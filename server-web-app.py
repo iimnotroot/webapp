@@ -3,7 +3,7 @@ import sys
 
 def validate_args(args: list[str]):
     if len(args) != 2:
-        print("usage: server-wen-app-py <port>")
+        print("usage: server-web-app.py <port>")
         exit(1)
     try:
         int(args[1])
@@ -37,9 +37,9 @@ def main():
 
 
     mysocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    mysocket.bind(('0.0.0.0', port)) # Para que se conecte cualqueir persona poner 0.0.0.0 para no tener que saber la dirección IP de la máquina
+    mysocket.bind(('0.0.0.0', port))
 
-    mysocket.listen(5) # El argumento es el numero de conexiones TCP máximas que permite
+    mysocket.listen(5)
 
     while True:
         print("Waiting for connections...\n")
