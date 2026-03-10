@@ -1,3 +1,4 @@
+import os
 import socketserver
 import http.server
 import http.cookies
@@ -5,6 +6,7 @@ from urllib.parse import urlparse,parse_qs
 import shelve
 import sys
 import uuid
+import hashlib
 
 def validate_args(args: list[str]):
     if len(args) != 2:
@@ -15,6 +17,43 @@ def validate_args(args: list[str]):
     except ValueError:
         print("error: port must be a number")
         exit(1)
+
+def hash_password(password: str):
+    salt = os.urandom(16)
+    hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000)
+    return salt + hashed
+def verify_password(stored_password, provided_password):
+    salt = stored_password[:16]
+    stored_hash = stored_password[16:]
+    new_hash = hashlib.pbkdf2_hmac('sha256', provided_password.encode(), salt, 100000)
+    return new_hash == stored_hash
+
+
+def verify_credentials(username, password):
+    with shelve.open("credentials") as creds:
+        if username in creds:
+            if verify_password(creds[username], password):
+                return "Log in complete"
+            else:
+                return "Log in failed"
+        else:
+            return "Log in failed"
+
+
+def add_credentials(username,password):
+    with shelve.open("credentials") as creds:
+        if username not in creds:
+            pass_hashed = hash_password(password)
+            creds[username] = pass_hashed
+            return "Sign up complete"
+        else:
+            return "Sign up failed"
+def give_cookiesession(username):
+    with shelve.open("cookies") as cookies:
+        session_id = str(uuid.uuid4())
+        cookies[session_id] = username
+    return session_id
+
 class webHandler(http.server.BaseHTTPRequestHandler):
 
     def home(self, username):
@@ -25,10 +64,13 @@ class webHandler(http.server.BaseHTTPRequestHandler):
                                                             <!DOCTYPE html>
                                                             <html>
                                                             <head>
-                                                                <title>Pagina web</title>
+                                                                <title>Web Page</title>
                                                             </head>
                                                             <body>
                                                                 <p>Welcome Home {username}!</p>
+                                                                <form action="/home" method="post">
+                                                                <button type="submit" value="logout" name="action">Log out</button>
+                                                                </form>
                                                             </body>
                                                             </html>
                                                             """
@@ -42,7 +84,7 @@ class webHandler(http.server.BaseHTTPRequestHandler):
                                                     <!DOCTYPE html>
                                                     <html>
                                                     <head>
-                                                        <title>Pagina web</title>
+                                                        <title>Web Page</title>
                                                     </head>
                                                     <body>
                                                         <p>Login|Sign up:</p>
@@ -99,33 +141,15 @@ class webHandler(http.server.BaseHTTPRequestHandler):
             [session_id, username] = self.getSessionId()
             if session_id is not None:
                 self.home(username)
-
-
-
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
-        html = """<!DOCTYPE html>"""
-        self.wfile.write(html.encode("utf-8"))
-
-    def verify_credentials(self, username, password):
-        with shelve.open("credentials") as creds:
-            if username in creds and password in creds[username]:
-                return True
             else:
-                return False
+                self.send_response(302)
+                self.send_header("Location", "/login")
+                self.end_headers()
 
-    def add_credentials(self,username,password):
-        with shelve.open("credentials") as creds:
-            if username not in creds:
-                creds[username] = password
-                return True
-            else:
-                return False
-    def give_cookiesession(self, username):
-        with shelve.open("cookies") as cookies:
-            session_id = str(uuid.uuid4())
-            cookies[session_id] = username
-        return session_id
+        else:
+            self.send_response(404)
+            self.end_headers()
+
 
     def do_POST(self):
         urlparsed = urlparse(self.path)
@@ -135,30 +159,62 @@ class webHandler(http.server.BaseHTTPRequestHandler):
             form = parse_qs(post_data)
             username = form.get('username', None)[0]
             password = form.get('password', None)[0]
+            if len(username) > 25 or len(password) > 50:
+                self.login("Input to long")
+                print("INFO: input is too long")
+                return
             action = form.get('action', None)[0]
             if action == "login":
-                if self.verify_credentials(username, password):
-                    print("INFO: user logged in, redirecting to home page...")
-                    session_id = self.give_cookiesession(username)
+                status: str = verify_credentials(username, password)
+                if status == "Log in complete":
+                    print(f"INFO: user {username} logged in, redirecting to home page...")
+                    session_id = give_cookiesession(username)
                     cookie = http.cookies.SimpleCookie()
                     cookie["session_id"] = session_id
+                    cookie["session_id"]["httponly"] = True
+                    cookie["session_id"]["secure"] = False
+                    cookie["session_id"]["samesite"] = "Strict"
+                    cookie["session_id"]["max-age"] = 3600
 
-                    self.send_response(301)
+                    self.send_response(302)
                     self.send_header("Set-Cookie", cookie.output(header='', sep=''))
                     self.send_header("Location", "/home")
-                    self.home(username)
+                    self.end_headers()
                 else:
                     print("WARNING: user not logged in, redirecting again to login page...")
                     self.login("Credentials are incorrect, please try again")
             elif action == "signup":
-                if self.add_credentials(username, password):
-                    print("INFO: user sign up, redirecting to login page...")
+                status: str = add_credentials(username, password)
+                if status == "Sign up complete":
+                    print(f"INFO: user {username} sign up, redirecting to login page...")
                     self.login("Log in or Sign up")
                 else:
                     print("WARINING: user exists, redirecting to login page...")
                     self.login("User exists, pleas try with other username")
+        elif urlparsed.path == "/home":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode("utf-8")
+            form = parse_qs(post_data)
+            action = form.get('action', None)[0]
+            if action == "logout":
+                session_id, username = self.getSessionId()
 
-        self.send_response(404)
+                if session_id:
+                    with shelve.open("cookies") as cookies:
+                        if session_id in cookies:
+                            del cookies[session_id]
+
+                cookie = http.cookies.SimpleCookie()
+                cookie["session_id"] = ""
+                cookie["session_id"]["max-age"] = 0
+
+                self.send_response(302)
+                self.send_header("Set-Cookie", cookie.output(header='', sep=''))
+                self.send_header("Location", "/login")
+                self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 
 
